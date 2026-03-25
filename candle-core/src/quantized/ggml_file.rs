@@ -125,11 +125,23 @@ fn from_raw_data<T: super::GgmlType + Send + Sync + 'static>(
 ) -> Result<super::QTensor> {
     let raw_data_ptr = raw_data.as_ptr();
     let n_blocks = size_in_bytes / std::mem::size_of::<T>();
-    let data = unsafe { std::slice::from_raw_parts(raw_data_ptr as *const T, n_blocks) };
+    
+    // GGML files store data in little-endian format
+    // On big-endian systems, we need to convert multi-byte fields
+    #[cfg(target_endian = "big")]
+    let data = {
+        let mut blocks = unsafe { std::slice::from_raw_parts(raw_data_ptr as *const T, n_blocks).to_vec() };
+        super::k_quants::fix_endianness(&mut blocks);
+        blocks
+    };
+    
+    #[cfg(target_endian = "little")]
+    let data = unsafe { std::slice::from_raw_parts(raw_data_ptr as *const T, n_blocks) }.to_vec();
+    
     let data: QStorage = match device {
-        Device::Cpu => QStorage::Cpu(Box::new(data.to_vec())),
-        Device::Metal(metal) => super::metal::load_quantized(metal, data)?,
-        Device::Cuda(cuda) => super::cuda::load_quantized(cuda, data)?,
+        Device::Cpu => QStorage::Cpu(Box::new(data)),
+        Device::Metal(metal) => super::metal::load_quantized(metal, &data)?,
+        Device::Cuda(cuda) => super::cuda::load_quantized(cuda, &data)?,
     };
     super::QTensor::new(data, dims)
 }

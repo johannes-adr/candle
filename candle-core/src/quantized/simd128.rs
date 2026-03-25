@@ -1,5 +1,4 @@
 use super::k_quants::{BlockQ2K, BlockQ4K, BlockQ4_0, BlockQ6K, BlockQ8K, BlockQ8_0, QK8_0, QK_K};
-use byteorder::{ByteOrder, LittleEndian};
 use half::f16;
 
 use core::arch::wasm32::*;
@@ -217,7 +216,10 @@ pub(crate) fn vec_dot_q4k_q8k(n: usize, xs: &[BlockQ4K], ys: &[BlockQ8K]) -> f32
                 );
             }
 
-            LittleEndian::read_u32_into(&x.scales, &mut utmp[0..3]);
+            // Scales are stored in little-endian format, convert to native u32 for computation
+            utmp[0] = u32::from_le_bytes([x.scales[0], x.scales[1], x.scales[2], x.scales[3]]);
+            utmp[1] = u32::from_le_bytes([x.scales[4], x.scales[5], x.scales[6], x.scales[7]]);
+            utmp[2] = u32::from_le_bytes([x.scales[8], x.scales[9], x.scales[10], x.scales[11]]);
 
             utmp[3] = ((utmp[2] >> 4) & KMASK2) | (((utmp[1] >> 6) & KMASK3) << 4);
             let uaux = utmp[1] & KMASK1;
@@ -226,8 +228,10 @@ pub(crate) fn vec_dot_q4k_q8k(n: usize, xs: &[BlockQ4K], ys: &[BlockQ8K]) -> f32
             utmp[0] &= KMASK1;
 
             //extract scales and mins
-            LittleEndian::write_u32_into(&utmp[0..2], &mut scales);
-            LittleEndian::write_u32_into(&utmp[2..4], &mut mins);
+            scales[0..4].copy_from_slice(&utmp[0].to_le_bytes());
+            scales[4..8].copy_from_slice(&utmp[1].to_le_bytes());
+            mins[0..4].copy_from_slice(&utmp[2].to_le_bytes());
+            mins[4..8].copy_from_slice(&utmp[3].to_le_bytes());
 
             let mut sumi = i32x4_splat(0);
             for j in (0..QK_K / 16).step_by(4) {

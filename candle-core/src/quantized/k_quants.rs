@@ -5,9 +5,21 @@ use super::utils::{
 use super::GgmlDType;
 use crate::quantized::utils::{make_qkx3_quants, make_qp_quants};
 use crate::Result;
-use byteorder::{ByteOrder, LittleEndian};
 use half::{bf16, f16, slice::HalfFloatSliceExt};
 use rayon::prelude::*;
+
+/// Fix endianness for block types on big-endian systems
+/// GGML files store f16 values in little-endian format
+#[cfg(target_endian = "big")]
+pub fn fix_endianness<T: GgmlType>(blocks: &mut [T]) {
+    // Dispatch to type-specific endianness fix
+    T::fix_endianness_slice(blocks);
+}
+
+#[cfg(target_endian = "little")]
+pub fn fix_endianness<T: GgmlType>(_blocks: &mut [T]) {
+    // No-op on little-endian systems
+}
 
 // Default to QK_K 256 rather than 64.
 pub const QK_K: usize = 256;
@@ -49,6 +61,13 @@ pub trait GgmlType: Sized + Clone + Send + Sync {
     /// Dot product used as a building block for quantized mat-mul.
     /// n is the number of elements to be considered.
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32;
+    
+    /// Fix endianness for multi-byte fields (f16, f32, etc.) on big-endian systems
+    /// Default implementation is no-op for types without multi-byte fields
+    #[cfg(target_endian = "big")]
+    fn fix_endianness_slice(_blocks: &mut [Self]) {
+        // Default: no-op for types without endianness issues
+    }
 
     /// Generic implementation of the dot product without simd optimizations.
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32;
@@ -395,7 +414,7 @@ impl GgmlType for BlockQ5_0 {
         let mut sumf = 0f32;
 
         for (xs, ys) in xs.iter().zip(ys.iter()) {
-            let qh = LittleEndian::read_u32(&xs.qh);
+            let qh = u32::from_le_bytes(xs.qh);
             let mut sumi = 0i32;
 
             for j in 0..Self::BLCK_SIZE / 2 {
@@ -447,7 +466,7 @@ impl GgmlType for BlockQ5_0 {
                 qh |= ((xi0 as u32 & 0x10) >> 4) << j;
                 qh |= ((xi1 as u32 & 0x10) >> 4) << (j + Self::BLCK_SIZE / 2);
             }
-            LittleEndian::write_u32(&mut ys.qh, qh)
+            ys.qh = qh.to_le_bytes();
         }
     }
 
@@ -461,7 +480,7 @@ impl GgmlType for BlockQ5_0 {
         let nb = k / QK5_0;
         for i in 0..nb {
             let d = xs[i].d.to_f32();
-            let qh: u32 = LittleEndian::read_u32(&xs[i].qh);
+            let qh: u32 = u32::from_le_bytes(xs[i].qh);
 
             for j in 0..(QK5_0 / 2) {
                 let xh_0 = (((qh >> j) << 4) & 0x10) as u8;
@@ -501,7 +520,7 @@ impl GgmlType for BlockQ5_1 {
         let mut sumf = 0f32;
 
         for (xs, ys) in xs.iter().zip(ys.iter()) {
-            let qh = LittleEndian::read_u32(&xs.qh);
+            let qh = u32::from_le_bytes(xs.qh);
             let mut sumi = 0i32;
 
             for j in 0..Self::BLCK_SIZE / 2 {
@@ -558,7 +577,7 @@ impl GgmlType for BlockQ5_1 {
                 qh |= ((xi0 as u32 & 0x10) >> 4) << j;
                 qh |= ((xi1 as u32 & 0x10) >> 4) << (j + qk / 2);
             }
-            LittleEndian::write_u32(&mut ys.qh, qh);
+            ys.qh = qh.to_le_bytes();
         }
     }
 
@@ -574,7 +593,7 @@ impl GgmlType for BlockQ5_1 {
         for i in 0..nb {
             let d = xs[i].d.to_f32();
             let m = xs[i].m.to_f32();
-            let qh: u32 = LittleEndian::read_u32(&xs[i].qh);
+            let qh: u32 = u32::from_le_bytes(xs[i].qh);
 
             for j in 0..(QK5_1 / 2) {
                 let xh_0 = (((qh >> j) << 4) & 0x10) as u8;
@@ -993,6 +1012,15 @@ impl GgmlType for BlockQ3K {
 
         Self::vec_dot_unopt(n, xs, ys)
     }
+    
+    #[cfg(target_endian = "big")]
+    fn fix_endianness_slice(blocks: &mut [Self]) {
+        // BlockQ3K has an f16 field that needs byte-swapping
+        for block in blocks.iter_mut() {
+            let bytes = block.d.to_le_bytes();
+            block.d = f16::from_be_bytes(bytes);
+        }
+    }
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
         debug_assert!(
@@ -1077,7 +1105,10 @@ impl GgmlType for BlockQ3K {
 
             a = &mut aux8[..];
 
-            LittleEndian::read_u32_into(&x.scales, &mut auxs[0..3]);
+            // Scales are stored in little-endian format, convert to native u32 for computation
+            auxs[0] = u32::from_le_bytes([x.scales[0], x.scales[1], x.scales[2], x.scales[3]]);
+            auxs[1] = u32::from_le_bytes([x.scales[4], x.scales[5], x.scales[6], x.scales[7]]);
+            auxs[2] = u32::from_le_bytes([x.scales[8], x.scales[9], x.scales[10], x.scales[11]]);
 
             let tmp = auxs[2];
             auxs[2] = ((auxs[0] >> 4) & KMASK2) | (((tmp >> 4) & KMASK1) << 4);
@@ -1087,7 +1118,7 @@ impl GgmlType for BlockQ3K {
 
             for aux in auxs {
                 for scale in aux.to_le_bytes() {
-                    let scale = i8::from_be_bytes([scale]);
+                    let scale = scale as i8;
                     for l in 0..8 {
                         aux16[l] = q8[l] as i16 * a[l] as i16;
                     }
@@ -1302,7 +1333,10 @@ impl GgmlType for BlockQ3K {
         for (block, y) in group_for_dequantization(xs, ys) {
             //Reconstruct the scales
             let mut aux = [0; 4];
-            LittleEndian::read_u32_into(&block.scales, &mut aux[0..3]);
+            // Scales are stored in little-endian format, convert to native u32 for computation
+            aux[0] = u32::from_le_bytes([block.scales[0], block.scales[1], block.scales[2], block.scales[3]]);
+            aux[1] = u32::from_le_bytes([block.scales[4], block.scales[5], block.scales[6], block.scales[7]]);
+            aux[2] = u32::from_le_bytes([block.scales[8], block.scales[9], block.scales[10], block.scales[11]]);
 
             let tmp = aux[2];
             aux[2] = ((aux[0] >> 4) & KMASK2) | (((tmp >> 4) & KMASK1) << 4);
@@ -1311,8 +1345,15 @@ impl GgmlType for BlockQ3K {
             aux[1] = (aux[1] & KMASK2) | (((tmp >> 2) & KMASK1) << 4);
 
             //Transfer the scales into an i8 array
-            let scales: &mut [i8] =
-                unsafe { std::slice::from_raw_parts_mut(aux.as_mut_ptr() as *mut i8, 16) };
+            // On big-endian systems, we need to convert each u32 to bytes in little-endian order
+            let mut scales_bytes = [0u8; 16];
+            for (i, &aux_val) in aux.iter().enumerate() {
+                let bytes = aux_val.to_le_bytes();
+                scales_bytes[i * 4..(i + 1) * 4].copy_from_slice(&bytes);
+            }
+            let scales: &[i8] = unsafe {
+                std::slice::from_raw_parts(scales_bytes.as_ptr() as *const i8, 16)
+            };
 
             let d_all = block.d.to_f32();
             let mut m = 1;
@@ -1408,7 +1449,10 @@ impl GgmlType for BlockQ4K {
                 q4 = &q4[32..];
             }
 
-            LittleEndian::read_u32_into(&x.scales, &mut utmp[0..3]);
+            // Scales are stored in little-endian format, convert to native u32 for computation
+            utmp[0] = u32::from_le_bytes([x.scales[0], x.scales[1], x.scales[2], x.scales[3]]);
+            utmp[1] = u32::from_le_bytes([x.scales[4], x.scales[5], x.scales[6], x.scales[7]]);
+            utmp[2] = u32::from_le_bytes([x.scales[8], x.scales[9], x.scales[10], x.scales[11]]);
 
             utmp[3] = ((utmp[2] >> 4) & KMASK2) | (((utmp[1] >> 6) & KMASK3) << 4);
             let uaux = utmp[1] & KMASK1;
@@ -1417,8 +1461,10 @@ impl GgmlType for BlockQ4K {
             utmp[0] &= KMASK1;
 
             //extract scales and mins
-            LittleEndian::write_u32_into(&utmp[0..2], &mut scales);
-            LittleEndian::write_u32_into(&utmp[2..4], &mut mins);
+            scales[0..4].copy_from_slice(&utmp[0].to_le_bytes());
+            scales[4..8].copy_from_slice(&utmp[1].to_le_bytes());
+            mins[0..4].copy_from_slice(&utmp[2].to_le_bytes());
+            mins[4..8].copy_from_slice(&utmp[3].to_le_bytes());
 
             let mut sumi = 0;
             for j in 0..QK_K / 16 {
@@ -1669,7 +1715,10 @@ impl GgmlType for BlockQ5K {
                 q5 = &q5[32..];
             }
 
-            LittleEndian::read_u32_into(&x.scales, &mut utmp[0..3]);
+            // Scales are stored in little-endian format, convert to native u32 for computation
+            utmp[0] = u32::from_le_bytes([x.scales[0], x.scales[1], x.scales[2], x.scales[3]]);
+            utmp[1] = u32::from_le_bytes([x.scales[4], x.scales[5], x.scales[6], x.scales[7]]);
+            utmp[2] = u32::from_le_bytes([x.scales[8], x.scales[9], x.scales[10], x.scales[11]]);
 
             utmp[3] = ((utmp[2] >> 4) & KMASK2) | (((utmp[1] >> 6) & KMASK3) << 4);
             let uaux = utmp[1] & KMASK1;
@@ -1678,8 +1727,10 @@ impl GgmlType for BlockQ5K {
             utmp[0] &= KMASK1;
 
             //extract scales and mins
-            LittleEndian::write_u32_into(&utmp[0..2], &mut scales);
-            LittleEndian::write_u32_into(&utmp[2..4], &mut mins);
+            scales[0..4].copy_from_slice(&utmp[0].to_le_bytes());
+            scales[4..8].copy_from_slice(&utmp[1].to_le_bytes());
+            mins[0..4].copy_from_slice(&utmp[2].to_le_bytes());
+            mins[4..8].copy_from_slice(&utmp[3].to_le_bytes());
 
             let mut sumi = 0;
             for j in 0..QK_K / 16 {

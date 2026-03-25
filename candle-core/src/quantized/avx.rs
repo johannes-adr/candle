@@ -1,7 +1,6 @@
 use super::k_quants::{
     BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ5K, BlockQ6K, BlockQ8K, BlockQ8_0, QK8_0, QK_K,
 };
-use byteorder::{ByteOrder, LittleEndian};
 use half::f16;
 
 #[cfg(target_arch = "x86")]
@@ -327,7 +326,10 @@ pub(crate) fn vec_dot_q3k_q8k(n: usize, xs: &[BlockQ3K], ys: &[BlockQ8K]) -> f32
             let mut q3 = x.qs.as_ptr();
             let mut q8 = y.qs.as_ptr();
 
-            LittleEndian::read_u32_into(&x.scales, &mut aux);
+            // Scales are stored in little-endian format, convert to native u32 for computation
+            aux[0] = u32::from_le_bytes([x.scales[0], x.scales[1], x.scales[2], x.scales[3]]);
+            aux[1] = u32::from_le_bytes([x.scales[4], x.scales[5], x.scales[6], x.scales[7]]);
+            aux[2] = u32::from_le_bytes([x.scales[8], x.scales[9], x.scales[10], x.scales[11]]);
             let scales128 = _mm_set_epi32(
                 (((aux[1] >> 4) & KMASK2) | (((aux[2] >> 6) & KMASK1) << 4)) as i32,
                 (((aux[0] >> 4) & KMASK2) | (((aux[2] >> 4) & KMASK1) << 4)) as i32,
@@ -460,7 +462,10 @@ pub(crate) fn vec_dot_q4k_q8k(n: usize, xs: &[BlockQ4K], ys: &[BlockQ8K]) -> f32
             let d = y.d * x.d.to_f32();
             let dmin = -y.d * x.dmin.to_f32();
 
-            LittleEndian::read_u32_into(&x.scales, &mut utmp[0..3]);
+            // Scales are stored in little-endian format, convert to native u32 for computation
+            utmp[0] = u32::from_le_bytes([x.scales[0], x.scales[1], x.scales[2], x.scales[3]]);
+            utmp[1] = u32::from_le_bytes([x.scales[4], x.scales[5], x.scales[6], x.scales[7]]);
+            utmp[2] = u32::from_le_bytes([x.scales[8], x.scales[9], x.scales[10], x.scales[11]]);
 
             utmp[3] = ((utmp[2] >> 4) & KMASK2) | (((utmp[1] >> 6) & KMASK3) << 4);
             let uaux = utmp[1] & KMASK1;
@@ -547,7 +552,10 @@ pub(crate) fn vec_dot_q5k_q8k(n: usize, xs: &[BlockQ5K], ys: &[BlockQ8K]) -> f32
             let d = y.d * x.d.to_f32();
             let dmin = -y.d * x.dmin.to_f32();
 
-            LittleEndian::read_u32_into(&x.scales, &mut utmp[0..3]);
+            // Scales are stored in little-endian format, convert to native u32 for computation
+            utmp[0] = u32::from_le_bytes([x.scales[0], x.scales[1], x.scales[2], x.scales[3]]);
+            utmp[1] = u32::from_le_bytes([x.scales[4], x.scales[5], x.scales[6], x.scales[7]]);
+            utmp[2] = u32::from_le_bytes([x.scales[8], x.scales[9], x.scales[10], x.scales[11]]);
 
             utmp[3] = ((utmp[2] >> 4) & KMASK2) | (((utmp[1] >> 6) & KMASK3) << 4);
             let uaux = utmp[1] & KMASK1;
